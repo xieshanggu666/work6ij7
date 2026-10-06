@@ -447,6 +447,96 @@ def test_leaderboard_isolated_by_version():
     assert len(v1["entries"]) == 1 and v1["entries"][0]["record_id"] == s["record_id"]
 
 
+# ---------- 新版本发布后的旧成绩：审核 / 回放 / 撤销恢复 / 解锁联动 ----------
+
+def test_old_version_pending_still_reviewable_after_new_version():
+    """v1 的待审成绩在 v2 发布后仍可初审：进 v1 榜、开回放、联动解锁。"""
+    a = _create(title="旧版航线")
+    b = _create(title="依赖挑战", unlock_rule={"type": "challenge",
+                                             "challenge_id": a["id"]})
+    r = _run(a["id"])
+    s = _submit(a["id"], r["run_id"], "old-pending")  # v1 待审
+    ch_api.publish_version(a["id"], ch_api.VersionIn(**_def(budget_dv=0.003)))
+    assert _unlocked(ch_api.list_challenges()["challenges"], b["id"]) is False
+
+    rv = _approve(s["record_id"])  # 审核的是 v1 旧成绩
+    assert rv["review_status"] == "approved"
+    assert rv["version"] == 1
+    assert rv["effects"]["leaderboard"]["version"] == 1
+    assert rv["effects"]["leaderboard"]["on_board"] is True
+    # 只进 v1 榜，不占 v2 榜
+    v1 = ch_api.get_leaderboard(a["id"], version=1)["entries"]
+    assert [e["record_id"] for e in v1] == [s["record_id"]]
+    assert ch_api.get_leaderboard(a["id"])["entries"] == []
+    # 回放开放、旧版本成绩仍计入解锁
+    detail = ch_api.get_submission(s["record_id"])
+    assert detail["replayable"] is True and detail["trajectory"]
+    assert _unlocked(ch_api.list_challenges()["challenges"], b["id"]) is True
+
+
+def test_old_version_score_revoke_restore_after_new_version():
+    """v2 发布后，v1 已上榜成绩仍可撤销/恢复，并正确级联解锁。"""
+    a = _create(title="前置旧版")
+    b = _create(title="后续新版", unlock_rule={"type": "challenge",
+                                             "challenge_id": a["id"]})
+    r = _run(a["id"])
+    s = _submit(a["id"], r["run_id"], "old-approved")
+    _approve(s["record_id"])
+    ch_api.publish_version(a["id"], ch_api.VersionIn(**_def(budget_dv=0.003)))
+    assert _unlocked(ch_api.list_challenges()["challenges"], b["id"]) is True
+
+    # 撤销旧版本成绩：出 v1 榜、关回放、级联回收解锁
+    out = _revoke(s["record_id"])
+    assert out["review_status"] == "revoked"
+    assert out["effects"]["leaderboard"]["on_board"] is False
+    assert out["effects"]["replayable"] == {"before": True, "after": False}
+    changes = {c["challenge_id"]: c for c in out["effects"]["unlock_changes"]}
+    assert changes[b["id"]]["unlocked"] is False
+    assert ch_api.get_leaderboard(a["id"], version=1)["entries"] == []
+    assert ch_api.get_submission(s["record_id"])["replayable"] is False
+    assert _unlocked(ch_api.list_challenges()["challenges"], b["id"]) is False
+
+    # 恢复旧版本成绩：回到 v1 榜、回放重开、解锁恢复
+    out = _restore(s["record_id"])
+    assert out["review_status"] == "approved"
+    assert out["effects"]["leaderboard"]["on_board"] is True
+    v1 = ch_api.get_leaderboard(a["id"], version=1)["entries"]
+    assert [e["record_id"] for e in v1] == [s["record_id"]]
+    assert ch_api.get_submission(s["record_id"])["replayable"] is True
+    assert _unlocked(ch_api.list_challenges()["challenges"], b["id"]) is True
+
+
+def test_leaderboard_effect_on_board_is_per_version():
+    """在榜联动按版本判定：新版本有更优成绩时，旧版本榜首仍在 v1 榜。"""
+    d = _create()
+    # v1：甲 3 星（燃料 0.0017 / 预算 0.004）
+    s1, _ = _submitted(d["id"], sub_id="pv-1",
+                       actions=[{"type": "burn", "angle": 90.0, "dv": 0.0017}])
+    _approve(s1["record_id"])
+    ch_api.publish_version(d["id"], ch_api.VersionIn(**_def(budget_dv=0.003)))
+    # v2：甲 3 星且更省（0.0015 / 预算 0.003）→ 跨版本最佳是 v2 成绩
+    s2, _ = _submitted(d["id"], sub_id="pv-2",
+                       actions=[{"type": "burn", "angle": 90.0, "dv": 0.0015}])
+    _approve(s2["record_id"])
+    assert [e["record_id"] for e in
+            ch_api.get_leaderboard(d["id"], version=1)["entries"]] == [s1["record_id"]]
+    assert [e["record_id"] for e in
+            ch_api.get_leaderboard(d["id"])["entries"]] == [s2["record_id"]]
+
+    # 撤销再恢复 v1 成绩：联动效果锚定 v1 榜，而非跨版本最佳
+    _revoke(s1["record_id"])
+    out = _restore(s1["record_id"])
+    eff = out["effects"]["leaderboard"]
+    assert eff["version"] == 1
+    assert eff["on_board"] is True               # v1 榜榜首，与新版本成绩无关
+    assert eff["best_record_id"] == s1["record_id"]
+    # 撤销 v1 榜首后 v1 榜出榜、v2 榜不受影响
+    out = _revoke(s1["record_id"])
+    assert out["effects"]["leaderboard"]["on_board"] is False
+    assert [e["record_id"] for e in
+            ch_api.get_leaderboard(d["id"])["entries"]] == [s2["record_id"]]
+
+
 # ---------- 解锁联动 ----------
 
 def test_unlock_by_builtin_level():

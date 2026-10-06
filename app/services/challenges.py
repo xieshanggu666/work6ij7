@@ -799,25 +799,48 @@ def _add_event(db, rec, *, kind: str, actor: str = "",
 
 # ---------- 排行榜/解锁联动效果（回滚可观测） ----------
 
+def _version_board(db, challenge_id: int, version: int) -> List[ChallengeSubmission]:
+    """某版本排行榜的入榜成绩：仅审核通过、每名玩家取最佳一条，按榜序排列。
+
+    排行榜按版本分别结算：成绩只进入其所属版本的榜，新旧版本互不占位。
+    """
+    rows = (db.query(ChallengeSubmission)
+              .filter(ChallengeSubmission.challenge_id == challenge_id,
+                      ChallengeSubmission.version == version,
+                      ChallengeSubmission.review_status == APPROVED)
+              .order_by(ChallengeSubmission.stars.desc(),
+                        ChallengeSubmission.fuel_used.asc(),
+                        ChallengeSubmission.elapsed_days.asc(),
+                        ChallengeSubmission.id.asc())
+              .all())
+    entries, seen = [], set()
+    for r in rows:
+        if r.player in seen:
+            continue
+        seen.add(r.player)
+        entries.append(r)
+    return entries
+
+
 def _snapshot_effects(db) -> dict:
-    """操作前快照：各挑战是否在榜（本人最佳 approved）+ 全部挑战解锁状态。"""
-    best = _best_approved(db)
+    """操作前快照：全部挑战的解锁状态（供操作后 diff）。"""
     builtin, ch_stars, total, titles = _unlock_context(db)
     unlocked = {}
     for ch in db.query(Challenge).filter(Challenge.status != "archived").all():
         ok, _ = _unlock_state(_rule_of(ch), builtin, ch_stars, total, titles)
         unlocked[ch.id] = ok
-    return {"best": best, "unlocked": unlocked, "titles": titles}
+    return {"unlocked": unlocked, "titles": titles}
 
 
 def _effects(db, before: dict, rec: ChallengeSubmission, *,
              replayable_before: bool) -> dict:
-    """汇总一条成绩操作对排行榜/回放/解锁的联动效果（供回滚审计）。"""
-    best_now = _best_approved(db)
-    on_board = bool(
-        best_now.get(rec.challenge_id)
-        and best_now[rec.challenge_id]["record_id"] == rec.id
-        and rec.review_status == APPROVED)
+    """汇总一条成绩操作对排行榜/回放/解锁的联动效果（供回滚审计）。
+
+    在榜判定锚定成绩所属版本的排行榜：旧版本成绩只要仍是本版本内
+    该玩家最佳已审核成绩即在榜，与新版本身份无关。
+    """
+    board = _version_board(db, rec.challenge_id, rec.version)
+    on_board = any(e.id == rec.id for e in board)
     builtin, ch_stars, total, titles = _unlock_context(db)
     unlocked_now, desc = {}, {}
     for ch in db.query(Challenge).filter(Challenge.status != "archived").all():
@@ -837,8 +860,9 @@ def _effects(db, before: dict, rec: ChallengeSubmission, *,
         "record_id": rec.id,
         "status": rec.review_status,
         "leaderboard": {
+            "version": rec.version,
             "on_board": on_board,
-            "best_record_id": (best_now.get(rec.challenge_id) or {}).get("record_id"),
+            "best_record_id": board[0].id if board else None,
         },
         "replayable": {"before": replayable_before,
                        "after": rec.review_status == APPROVED},
@@ -1291,27 +1315,16 @@ def list_submissions(db, *, challenge_id: Optional[int] = None,
 
 def leaderboard(db, challenge_id: int, version: Optional[int] = None,
                 limit: int = 50) -> dict:
-    """排行榜：仅审核通过的成绩，按版本结算，每名玩家取最佳一条。
+    """排行榜：仅审核通过的成绩，按版本分别结算，每名玩家取最佳一条。
 
-    排序：星数 → 燃料 → 用时 → 先到优先。
+    排序：星数 → 燃料 → 用时 → 先到优先。旧版本榜单在新版本发布后
+    原样保留（?version= 可查），旧成绩的在榜状态不受新版本影响。
     """
     ch = _get_challenge(db, challenge_id)
     v_no = version or ch.current_version
     _get_version(db, challenge_id, v_no)  # 版本必须存在
-    rows = (db.query(ChallengeSubmission)
-              .filter(ChallengeSubmission.challenge_id == challenge_id,
-                      ChallengeSubmission.version == v_no,
-                      ChallengeSubmission.review_status == "approved")
-              .order_by(ChallengeSubmission.stars.desc(),
-                        ChallengeSubmission.fuel_used.asc(),
-                        ChallengeSubmission.elapsed_days.asc(),
-                        ChallengeSubmission.id.asc())
-              .all())
-    entries, seen = [], set()
-    for r in rows:
-        if r.player in seen:
-            continue
-        seen.add(r.player)
+    entries = []
+    for r in _version_board(db, challenge_id, v_no):
         entries.append({
             "rank": len(entries) + 1,
             "record_id": r.id,

@@ -309,6 +309,10 @@ body {
 .board-stars .dim { color: rgba(255, 209, 102, 0.22); }
 .board-meta { color: var(--muted); font-size: 12px; white-space: nowrap; }
 .board-empty { text-align: center; padding: 24px 0; }
+.board-vers {
+  display: flex; gap: 6px; flex-wrap: wrap; justify-content: center;
+  margin: 10px 0 2px;
+}
 
 /* ---------- 申诉与复核链路 ---------- */
 .review-tabs { display: flex; gap: 8px; margin: 14px 0; flex-wrap: wrap; }

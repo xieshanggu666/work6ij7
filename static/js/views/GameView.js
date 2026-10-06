@@ -23,6 +23,7 @@ window.GameView = {
       playerName: Store.get("pilot") || "",
       board: null,
       boardLoading: false,
+      boardVersion: null,
       mySubs: [],
       timeline: null,
       anim: { playing: false, time: 0, speed: 30 },
@@ -68,6 +69,11 @@ window.GameView = {
     },
     replayTag() {
       return this.challenge ? "▶ 回放排行榜成绩" : "▶ 回放最佳成绩";
+    },
+    // 排行榜版本切换：最新在前，标注当前版本
+    versionOptions() {
+      if (!this.challenge || !this.challenge.versions) return [];
+      return [...this.challenge.versions].reverse();
     },
     msText() {
       if (!this.activeSrc) return "";
@@ -224,12 +230,20 @@ window.GameView = {
     // ---- 挑战排行榜与回放 ----
     async openBoard() {
       if (!this.challenge || this.boardLoading) return;
-      this.boardLoading = true;
-      try {
-        this.board = await API.challengeLeaderboard(this.challenge.id);
-        if (this.playerName) {
+      // 默认展示当前版本榜；旧版本可切换查看（按版本分别结算）
+      await this.loadBoard(this.challenge.current_version);
+      if (this.playerName) {
+        try {
           this.mySubs = (await API.mySubmissions(this.playerName, this.challenge.id)).submissions || [];
-        }
+        } catch (e) { /* 我的提交加载失败不阻塞排行榜 */ }
+      }
+    },
+    async loadBoard(v) {
+      if (this.boardLoading) return;
+      this.boardLoading = true;
+      this.boardVersion = v;
+      try {
+        this.board = await API.challengeLeaderboard(this.challenge.id, v);
       } catch (e) {
         alert("加载排行榜失败：" + e.message);
       } finally {
@@ -456,7 +470,7 @@ window.GameView = {
           <div class="chud-status" :class="preOkClass">{{ preOk }}</div>
         </div>
         <div v-if="replayRecord" class="replay-bar">
-          <span class="replay-tag">{{ replayTag }}</span>
+          <span class="replay-tag">{{ replayTag }}<template v-if="challenge && replayRecord.version"> · v{{ replayRecord.version }}</template></span>
           <span class="replay-meta">
             <template v-for="i in 3" :key="i"><span :class="i <= replayRecord.stars ? 'lit' : 'dim'">★</span></template>
             · {{ (replayRecord.fuel_used * 1731.5).toFixed(1) }} km/s
@@ -563,7 +577,14 @@ window.GameView = {
     <div v-if="board" class="modal-mask" @click.self="board = null">
       <div class="modal board-modal">
         <h2>🏅 排行榜 <span class="ver-tag">v{{ board.version }}</span></h2>
-        <p class="modal-reason">审核通过的成绩 · 每名玩家取最佳一条</p>
+        <p class="modal-reason">按版本分别结算 · 审核通过的成绩 · 每名玩家取最佳一条</p>
+        <div v-if="versionOptions.length > 1" class="board-vers">
+          <button v-for="v in versionOptions" :key="v.version"
+                  class="btn mini" :class="{ primary: boardVersion === v.version }"
+                  :disabled="boardLoading" @click="loadBoard(v.version)">
+            v{{ v.version }}<template v-if="v.name"> {{ v.name }}</template><template v-if="v.version === challenge.current_version"> · 当前</template>
+          </button>
+        </div>
         <div v-if="board.entries && board.entries.length" class="board-list">
           <div v-for="e in board.entries" :key="e.record_id" class="board-row">
             <span class="board-rank" :class="'r' + e.rank">{{ e.rank }}</span>
@@ -580,7 +601,8 @@ window.GameView = {
           </div>
         </div>
         <p v-else class="plan-empty board-empty">
-          还没有审核通过的成绩，来当第一个上榜的飞行员！
+          {{ versionOptions.length > 1 && boardVersion !== challenge.current_version
+             ? '该版本还没有审核通过的成绩。' : '还没有审核通过的成绩，来当第一个上榜的飞行员！' }}
         </p>
 
         <!-- 我在本挑战的成绩：驳回/撤销可申诉，全链路可查 -->
@@ -588,7 +610,8 @@ window.GameView = {
           <h4>🧑‍✈️ 我的提交（{{ mySubs.length }}）</h4>
           <div v-for="m in mySubs" :key="m.record_id" class="mine-row">
             <span class="mine-meta">
-              #{{ m.record_id }} · ★{{ m.stars }} · {{ (m.fuel_used * 1731.5).toFixed(1) }} km/s
+              #{{ m.record_id }} <span class="ver-tag">v{{ m.version }}</span>
+              · ★{{ m.stars }} · {{ (m.fuel_used * 1731.5).toFixed(1) }} km/s
               · {{ Math.round(m.elapsed_days) }} 天
             </span>
             <span class="mine-status" :class="'s-' + m.review_status">
