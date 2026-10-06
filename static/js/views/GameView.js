@@ -21,7 +21,10 @@ window.GameView = {
       replayRecord: null,
       replayLoading: false,
       playerName: Store.get("pilot") || "",
+      playVersion: (this.challenge && this.challenge.current_version) || null,
+      activeVersionDetail: null,
       board: null,
+      boardVersion: null,
       boardLoading: false,
       mySubs: [],
       timeline: null,
@@ -33,6 +36,20 @@ window.GameView = {
     };
   },
   computed: {
+    activeLevel() {
+      if (!this.challenge) return this.level;
+      const v = this.activeVersionDetail || this.challenge.current;
+      return {
+        ...this.level,
+        version: v.version,
+        name: this.challenge.title,
+        brief: v.brief,
+        milestones: v.milestones,
+        budget_dv: v.budget_dv,
+        t_max: v.t_max,
+        hint: v.hint,
+      };
+    },
     bodyById() {
       const m = {};
       for (const b of this.bodies) m[b.id] = b;
@@ -50,15 +67,16 @@ window.GameView = {
     },
     fuelRatio() {
       if (!this.activeSrc) return 0;
-      return Math.min(1, this.activeSrc.fuel_used / this.level.budget_dv);
+      return Math.min(1, this.activeSrc.fuel_used / this.activeLevel.budget_dv);
     },
     fuelText() {
       if (!this.activeSrc) return "";
-      return `${(this.activeSrc.fuel_used * 1731.5).toFixed(1)} / ${(this.level.budget_dv * 1731.5).toFixed(1)} km/s`;
+      return `${(this.activeSrc.fuel_used * 1731.5).toFixed(1)} / ${(this.activeLevel.budget_dv * 1731.5).toFixed(1)} km/s`;
     },
     starBest() {
       if (this.challenge) {
-        return (this.challenge.best && this.challenge.best.stars) || 0;
+        const best = (this.challenge.best_current || this.challenge.best);
+        return (best && best.stars) || 0;
       }
       return (this.scores && this.scores[this.level.id] && this.scores[this.level.id].stars) || 0;
     },
@@ -72,7 +90,7 @@ window.GameView = {
     msText() {
       if (!this.activeSrc) return "";
       const done = (this.activeSrc.milestones || []).map(m => m.name);
-      const all = this.level.milestones.map(m => m.name);
+      const all = this.activeLevel.milestones.map(m => m.name);
       return all.map(n => (done.includes(n) ? "✅" : "⬜") + " " + n).join("　");
     },
     preOk() {
@@ -169,7 +187,8 @@ window.GameView = {
       if (!this.level) return;
       try {
         this.preview = this.challenge
-          ? await API.challengePreview(this.challenge.id, this.actions)
+          ? await API.challengePreview(this.challenge.id, this.actions,
+                                       this.playVersion || null)
           : await API.preview(this.level.id, this.actions);
         if (!this.anim.playing) this.anim.time = Math.min(this.anim.time, this.preview.elapsed_days);
       } catch (e) {
@@ -186,7 +205,8 @@ window.GameView = {
       try {
         if (this.challenge) {
           // 挑战模式：服务端结算 → 幂等提交 → 进入审核队列（通过后上榜/回放/解锁）
-          const r = await API.challengeRun(this.challenge.id, this.actions);
+          const r = await API.challengeRun(this.challenge.id, this.actions,
+                                          this.playVersion || null);
           this.result = r;
           this.preview = r;
           this.replayRecord = null;
@@ -221,20 +241,42 @@ window.GameView = {
         this.running = false;
       }
     },
-    // ---- 挑战排行榜与回放 ----
-    async openBoard() {
+    // ---- 挑战版本 / 排行榜与回放 ----
+    async switchPlayVersion(version) {
+      if (!this.challenge || this.playVersion === version) return;
+      this.playVersion = version;
+      this.activeVersionDetail = null;
+      this.reset();
+      if (version !== this.challenge.current_version) {
+        try {
+          this.activeVersionDetail = await API.challengeVersion(this.challenge.id, version);
+          this.reset();
+        } catch (e) {
+          alert("切换旧版本失败：" + e.message);
+          this.playVersion = this.challenge.current_version;
+        }
+      }
+    },
+    async openBoard(version) {
       if (!this.challenge || this.boardLoading) return;
       this.boardLoading = true;
+      this.boardVersion = version || this.boardVersion || this.challenge.current_version;
       try {
-        this.board = await API.challengeLeaderboard(this.challenge.id);
+        this.board = await API.challengeLeaderboard(this.challenge.id, this.boardVersion);
         if (this.playerName) {
-          this.mySubs = (await API.mySubmissions(this.playerName, this.challenge.id)).submissions || [];
+          this.mySubs = (await API.mySubmissions(
+            this.playerName, this.challenge.id, this.boardVersion)).submissions || [];
+        } else {
+          this.mySubs = [];
         }
       } catch (e) {
         alert("加载排行榜失败：" + e.message);
       } finally {
         this.boardLoading = false;
       }
+    },
+    async switchBoardVersion(version) {
+      await this.openBoard(version);
     },
     // ---- 申诉与审核链路 ----
     async appealRecord(rec) {
@@ -250,7 +292,7 @@ window.GameView = {
       try {
         await API.appealSubmission(rec.record_id, this.playerName,
                                    reason.trim(), appealId);
-        await this.openBoard();
+        await this.openBoard(this.board ? this.board.version : this.playVersion);
         this.$emit("challenge-change");
         alert("申诉已受理，成绩进入复核队列，请等待复核员裁决。");
       } catch (e) {
@@ -295,6 +337,11 @@ window.GameView = {
         if (!rec.replayable) {
           alert("该成绩尚未通过审核，暂不能回放。");
           return;
+        }
+        if (rec.version !== this.playVersion) {
+          this.playVersion = rec.version;
+          this.activeVersionDetail = rec.version === this.challenge.current_version
+            ? null : await API.challengeVersion(this.challenge.id, rec.version);
         }
         this.board = null;
         this.replayRecord = rec;
@@ -411,8 +458,11 @@ window.GameView = {
       <button class="btn ghost" @click="$emit('back')">{{ challenge ? '← 挑战列表' : '← 关卡' }}</button>
       <div class="hud-title">
         <h2>
-          {{ challenge ? '挑战 #' + challenge.id + ' · ' + level.name : '第 ' + level.id + ' 关 · ' + level.name }}
-          <span v-if="challenge" class="ver-tag">v{{ challenge.current_version }}</span>
+          {{ challenge ? '挑战 #' + challenge.id + ' · ' + activeLevel.name : '第 ' + level.id + ' 关 · ' + level.name }}
+          <span v-if="challenge" class="ver-tag">
+            v{{ activeLevel.version }}
+            <span v-if="activeLevel.version !== challenge.current_version" class="old-ver">旧版</span>
+          </span>
         </h2>
         <span class="best-stars">
           最佳
@@ -425,7 +475,13 @@ window.GameView = {
         <div class="fuel-label">燃料 {{ fuelText }}</div>
         <div class="fuel-bar"><div class="fuel-fill" :style="{width: (fuelRatio*100)+'%'}"></div></div>
       </div>
-      <button v-if="challenge" class="btn ghost" :disabled="boardLoading" @click="openBoard">
+      <select v-if="challenge" class="version-select"
+              :value="playVersion" @change="switchPlayVersion(+$event.target.value)">
+        <option v-for="v in challenge.versions" :key="v.version" :value="v.version">
+          v{{ v.version }}{{ v.version === challenge.current_version ? '（当前）' : '（旧版）' }}
+        </option>
+      </select>
+      <button v-if="challenge" class="btn ghost" :disabled="boardLoading" @click="openBoard(playVersion)">
         {{ boardLoading ? '加载中…' : '🏅 排行榜' }}
       </button>
       <button v-if="bestRecordId && !replayRecord" class="btn ghost" :disabled="replayLoading" @click="playBest">
@@ -456,7 +512,7 @@ window.GameView = {
           <div class="chud-status" :class="preOkClass">{{ preOk }}</div>
         </div>
         <div v-if="replayRecord" class="replay-bar">
-          <span class="replay-tag">{{ replayTag }}</span>
+          <span class="replay-tag">{{ replayTag }} v{{ replayRecord.version }}</span>
           <span class="replay-meta">
             <template v-for="i in 3" :key="i"><span :class="i <= replayRecord.stars ? 'lit' : 'dim'">★</span></template>
             · {{ (replayRecord.fuel_used * 1731.5).toFixed(1) }} km/s
@@ -525,7 +581,7 @@ window.GameView = {
         </div>
         <p v-else class="plan-empty">还没有动作。先加一次点火，把探测器推出地球轨道。</p>
 
-        <div v-if="hintShown" class="hint-box">💡 {{ level.hint }}</div>
+        <div v-if="hintShown" class="hint-box">💡 {{ activeLevel.hint }}</div>
       </aside>
     </div>
 
@@ -542,7 +598,7 @@ window.GameView = {
         <div class="modal-stats">
           <div><b>{{ (result.fuel_used * 1731.5).toFixed(1) }}</b> km/s 燃料</div>
           <div><b>{{ result.elapsed_days.toFixed(0) }}</b> 天</div>
-          <div><b>{{ (result.milestones || []).length }}/{{ level.milestones.length }}</b> 里程碑</div>
+          <div><b>{{ (result.milestones || []).length }}/{{ activeLevel.milestones.length }}</b> 里程碑</div>
         </div>
         <div class="modal-ms">{{ msText }}</div>
         <p v-if="challenge && result.ok && result.review_status" class="review-note">
@@ -553,7 +609,7 @@ window.GameView = {
           <button class="btn ghost" @click="result = null; anim.playing = true">▶ 回放</button>
           <button class="btn ghost" @click="result = null; reset()">重玩</button>
           <button v-if="!challenge && result.ok && level.id < 5" class="btn primary" @click="nextLevel">下一关 →</button>
-          <button v-if="challenge && result.ok" class="btn primary" @click="result = null; openBoard()">🏅 排行榜</button>
+          <button v-if="challenge && result.ok" class="btn primary" @click="result = null; openBoard(playVersion)">🏅 排行榜</button>
           <button v-if="!result.ok" class="btn primary" @click="result = null">继续调整</button>
         </div>
       </div>
@@ -562,8 +618,19 @@ window.GameView = {
     <!-- 挑战排行榜弹窗 -->
     <div v-if="board" class="modal-mask" @click.self="board = null">
       <div class="modal board-modal">
-        <h2>🏅 排行榜 <span class="ver-tag">v{{ board.version }}</span></h2>
-        <p class="modal-reason">审核通过的成绩 · 每名玩家取最佳一条</p>
+        <h2>
+          🏅 排行榜
+          <select class="version-select board-version-select"
+                  :value="board.version"
+                  @change="switchBoardVersion(+$event.target.value)">
+            <option v-for="v in challenge.versions" :key="v.version" :value="v.version">
+              v{{ v.version }}{{ v.version === challenge.current_version ? '（当前）' : '（旧版）' }}
+            </option>
+          </select>
+        </h2>
+        <p class="modal-reason">
+          v{{ board.version }} 审核通过的成绩 · 每名玩家取最佳一条 · 发布新版本不影响旧版审核与回放
+        </p>
         <div v-if="board.entries && board.entries.length" class="board-list">
           <div v-for="e in board.entries" :key="e.record_id" class="board-row">
             <span class="board-rank" :class="'r' + e.rank">{{ e.rank }}</span>
@@ -585,7 +652,7 @@ window.GameView = {
 
         <!-- 我在本挑战的成绩：驳回/撤销可申诉，全链路可查 -->
         <div v-if="mySubs.length" class="board-mine">
-          <h4>🧑‍✈️ 我的提交（{{ mySubs.length }}）</h4>
+          <h4>🧑‍✈️ 我的提交 · v{{ board.version }}（{{ mySubs.length }}）</h4>
           <div v-for="m in mySubs" :key="m.record_id" class="mine-row">
             <span class="mine-meta">
               #{{ m.record_id }} · ★{{ m.stars }} · {{ (m.fuel_used * 1731.5).toFixed(1) }} km/s

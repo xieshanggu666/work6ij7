@@ -221,6 +221,16 @@ body {
   background: rgba(90, 220, 255, 0.12); border: 1px solid rgba(90, 220, 255, 0.35);
   color: var(--cyan); font-size: 11px; font-weight: 400; vertical-align: middle;
 }
+.old-ver {
+  margin-left: 4px; color: var(--gold);
+}
+.version-select {
+  background: rgba(255, 255, 255, 0.06); border: 1px solid var(--line);
+  border-radius: 8px; padding: 6px 8px; color: var(--text);
+  font-size: 12px; font-family: inherit; outline: none;
+}
+.version-select option { background: #101a33; }
+.board-version-select { margin-left: 10px; vertical-align: middle; }
 .card-ops { display: flex; justify-content: flex-end; }
 .empty-tip { grid-column: 1 / -1; text-align: center; padding: 60px 0; }
 

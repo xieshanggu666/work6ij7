@@ -341,22 +341,71 @@ def _rule_of(ch: Challenge) -> Optional[dict]:
     return json.loads(ch.unlock_rule_json) if ch.unlock_rule_json else None
 
 
-def _best_approved(db) -> dict:
-    """每个挑战本机最佳已审核成绩（星数 → 燃料 → 先到优先）。"""
-    rows = (db.query(ChallengeSubmission)
-              .filter(ChallengeSubmission.review_status == "approved")
-              .order_by(ChallengeSubmission.stars.desc(),
-                        ChallengeSubmission.fuel_used.asc(),
-                        ChallengeSubmission.id.asc())
-              .all())
+def _best_from_rows(rows) -> dict:
+    """按审核展示顺序（星数 → 燃料 → 用时 → 先到）取每组首条成绩。"""
     best = {}
     for r in rows:
         if r.challenge_id not in best:
             best[r.challenge_id] = {
                 "stars": r.stars, "fuel_used": r.fuel_used,
                 "elapsed_days": r.elapsed_days, "record_id": r.id,
+                "version": r.version,
             }
     return best
+
+
+def _approved_rows(db, *, current_versions: Optional[dict] = None):
+    """已审核通过的成绩；可只取每个挑战的当前版本。"""
+    q = db.query(ChallengeSubmission).filter(
+        ChallengeSubmission.review_status == APPROVED)
+    rows = q.order_by(ChallengeSubmission.stars.desc(),
+                      ChallengeSubmission.fuel_used.asc(),
+                      ChallengeSubmission.elapsed_days.asc(),
+                      ChallengeSubmission.id.asc()).all()
+    if current_versions is None:
+        return rows
+    return [r for r in rows
+            if r.version == current_versions.get(r.challenge_id)]
+
+
+def _best_approved(db) -> dict:
+    """每个挑战跨版本的本机最佳已审核成绩（用于解锁；旧版本仍有效）。"""
+    return _best_from_rows(_approved_rows(db))
+
+
+def _current_versions(db) -> dict:
+    return {c.id: c.current_version
+            for c in db.query(Challenge).all()}
+
+
+def _best_current_approved(db) -> dict:
+    """每个挑战当前版本的本机最佳已审核成绩（用于挑战卡片/当前榜摘要）。"""
+    return _best_from_rows(_approved_rows(
+        db, current_versions=_current_versions(db)))
+
+
+def _best_record_info(r: ChallengeSubmission) -> dict:
+    return {
+        "stars": r.stars, "fuel_used": r.fuel_used,
+        "elapsed_days": r.elapsed_days, "record_id": r.id,
+        "version": r.version, "player": r.player,
+    }
+
+
+def _leaderboard_maps(db) -> Tuple[dict, dict]:
+    """返回 (每版本全局榜首, 每版本每名玩家的上榜成绩)。
+
+    排行榜展示每名玩家在该版本的最佳一条；撤销/恢复时据此判断记录是否仍在榜。
+    """
+    version_best, player_best = {}, {}
+    for r in _approved_rows(db):
+        versions = version_best.setdefault(r.challenge_id, {})
+        if r.version not in versions:
+            versions[r.version] = _best_record_info(r)
+        by_player = player_best.setdefault(r.challenge_id, {}).setdefault(r.version, {})
+        if r.player not in by_player:
+            by_player[r.player] = _best_record_info(r)
+    return version_best, player_best
 
 
 def list_challenges(db) -> List[dict]:
@@ -374,6 +423,7 @@ def list_challenges(db) -> List[dict]:
         pend[r.challenge_id] = pend.get(r.challenge_id, 0) + 1
     builtin, ch_stars, total, titles = _unlock_context(db)
     best = _best_approved(db)
+    best_current = _best_current_approved(db)
     out = []
     for ch in rows:
         v = vers.get(ch.id, {}).get(ch.current_version)
@@ -389,6 +439,7 @@ def list_challenges(db) -> List[dict]:
             "milestone_count": len(json.loads(v.milestones_json)) if v else 0,
             "unlocked": unlocked, "unlock_desc": desc,
             "best": best.get(ch.id),
+            "best_current": best_current.get(ch.id),
             "pending_count": pend.get(ch.id, 0),
         })
     return out
@@ -422,6 +473,7 @@ def challenge_detail(db, challenge_id: int) -> dict:
             "milestones": json.loads(cur.milestones_json),
         },
         "best": _best_approved(db).get(ch.id),
+        "best_current": _best_current_approved(db).get(ch.id),
     }
 
 
@@ -800,23 +852,26 @@ def _add_event(db, rec, *, kind: str, actor: str = "",
 # ---------- 排行榜/解锁联动效果（回滚可观测） ----------
 
 def _snapshot_effects(db) -> dict:
-    """操作前快照：各挑战是否在榜（本人最佳 approved）+ 全部挑战解锁状态。"""
-    best = _best_approved(db)
+    """操作前快照：各版本榜首 + 全部挑战解锁状态。"""
+    version_best, player_best = _leaderboard_maps(db)
     builtin, ch_stars, total, titles = _unlock_context(db)
     unlocked = {}
     for ch in db.query(Challenge).filter(Challenge.status != "archived").all():
         ok, _ = _unlock_state(_rule_of(ch), builtin, ch_stars, total, titles)
         unlocked[ch.id] = ok
-    return {"best": best, "unlocked": unlocked, "titles": titles}
+    return {"version_best": version_best, "player_best": player_best,
+            "unlocked": unlocked, "titles": titles}
 
 
 def _effects(db, before: dict, rec: ChallengeSubmission, *,
              replayable_before: bool) -> dict:
     """汇总一条成绩操作对排行榜/回放/解锁的联动效果（供回滚审计）。"""
-    best_now = _best_approved(db)
+    version_best, player_best = _leaderboard_maps(db)
+    version_top = version_best.get(rec.challenge_id, {}).get(rec.version)
+    player_entry = (player_best.get(rec.challenge_id, {})
+                    .get(rec.version, {}).get(rec.player))
     on_board = bool(
-        best_now.get(rec.challenge_id)
-        and best_now[rec.challenge_id]["record_id"] == rec.id
+        player_entry and player_entry["record_id"] == rec.id
         and rec.review_status == APPROVED)
     builtin, ch_stars, total, titles = _unlock_context(db)
     unlocked_now, desc = {}, {}
@@ -838,7 +893,8 @@ def _effects(db, before: dict, rec: ChallengeSubmission, *,
         "status": rec.review_status,
         "leaderboard": {
             "on_board": on_board,
-            "best_record_id": (best_now.get(rec.challenge_id) or {}).get("record_id"),
+            "best_record_id": version_top["record_id"] if version_top else None,
+            "version": rec.version,
         },
         "replayable": {"before": replayable_before,
                        "after": rec.review_status == APPROVED},
@@ -1167,12 +1223,15 @@ def list_appeals(db, *, status: str = APPEAL_PENDING,
 
 
 def player_submissions(db, player: str, *, challenge_id: Optional[int] = None,
+                       version: Optional[int] = None,
                        limit: int = 50) -> List[dict]:
     """按飞行员署名查询本人提交（玩家查看审核状态/入口申诉用）。"""
     player = (player or "").strip()[:24] or DEFAULT_PLAYER
     q = db.query(ChallengeSubmission).filter(ChallengeSubmission.player == player)
     if challenge_id is not None:
         q = q.filter(ChallengeSubmission.challenge_id == challenge_id)
+    if version is not None:
+        q = q.filter(ChallengeSubmission.version == version)
     rows = (q.order_by(ChallengeSubmission.id.desc())
              .limit(max(1, min(200, limit))).all())
     titles = {c.id: c.title for c in db.query(Challenge).all()}
@@ -1298,6 +1357,9 @@ def leaderboard(db, challenge_id: int, version: Optional[int] = None,
     ch = _get_challenge(db, challenge_id)
     v_no = version or ch.current_version
     _get_version(db, challenge_id, v_no)  # 版本必须存在
+    version_count = (db.query(ChallengeVersion)
+                       .filter(ChallengeVersion.challenge_id == challenge_id)
+                       .count())
     rows = (db.query(ChallengeSubmission)
               .filter(ChallengeSubmission.challenge_id == challenge_id,
                       ChallengeSubmission.version == v_no,
@@ -1315,6 +1377,7 @@ def leaderboard(db, challenge_id: int, version: Optional[int] = None,
         entries.append({
             "rank": len(entries) + 1,
             "record_id": r.id,
+            "version": r.version,
             "player": r.player,
             "stars": r.stars,
             "fuel_used": r.fuel_used,
@@ -1324,7 +1387,10 @@ def leaderboard(db, challenge_id: int, version: Optional[int] = None,
         })
         if len(entries) >= max(1, min(100, limit)):
             break
-    return {"challenge_id": challenge_id, "version": v_no, "entries": entries}
+    return {"challenge_id": challenge_id, "version": v_no,
+            "current_version": ch.current_version,
+            "version_count": version_count,
+            "entries": entries}
 
 
 def submission_detail(db, record_id: int) -> Optional[dict]:

@@ -37,7 +37,10 @@ window.ChallengeSelect = {
   },
   methods: {
     kmps(v) { return (v * 1731.5).toFixed(1); },
-    starOf(c) { return c.best ? c.best.stars : 0; },
+    starOf(c) {
+      const best = c.best_current || c.best;
+      return best ? best.stars : 0;
+    },
     fmtDate(ts) {
       if (!ts) return "";
       const d = new Date(ts * 1000);
@@ -317,9 +320,15 @@ window.ChallengeSelect = {
           设计 {{ c.author }} · 预算 {{ kmps(c.budget_dv) }} km/s · {{ c.milestone_count }} 个里程碑
           <span v-if="c.pending_count" class="pending-tag">待审 {{ c.pending_count }}</span>
         </div>
-        <div class="best-meta" v-if="c.best">
-          最佳 {{ kmps(c.best.fuel_used) }} km/s · {{ Math.round(c.best.elapsed_days) }} 天
+        <div class="best-meta" v-if="c.best_current">
+          当前 v{{ c.current_version }} 最佳 {{ kmps(c.best_current.fuel_used) }} km/s · {{ Math.round(c.best_current.elapsed_days) }} 天
+          <span class="ver-tag">v{{ c.best_current.version }}</span>
           <span class="replayable-tag">已上榜</span>
+        </div>
+        <div class="best-meta" v-else-if="c.best">
+          旧版最佳 {{ kmps(c.best.fuel_used) }} km/s · {{ Math.round(c.best.elapsed_days) }} 天
+          <span class="ver-tag">v{{ c.best.version }}</span>
+          <span class="replayable-tag">旧版可回放</span>
         </div>
         <div class="level-foot">
           <span class="stars">

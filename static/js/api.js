@@ -46,6 +46,9 @@ const API = {
     });
   },
   challenge(cid) { return this._req(`/api/challenges/${cid}`); },
+  challengeVersion(cid, version) {
+    return this._req(`/api/challenges/${cid}/versions/${version}`);
+  },
   publishVersion(cid, payload) {
     return this._req(`/api/challenges/${cid}/versions`, {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -58,10 +61,10 @@ const API = {
       body: JSON.stringify({ actions, version: version || null }),
     });
   },
-  challengeRun(cid, actions) {
+  challengeRun(cid, actions, version) {
     return this._req(`/api/challenges/${cid}/run`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ actions }),
+      body: JSON.stringify({ actions, version: version || null }),
     });
   },
   // 提交飞行记录：run_id 关联服务端执行档案，submission_id 为幂等键
@@ -128,8 +131,10 @@ const API = {
   submissionTimeline(recordId) {
     return this._req(`/api/challenges/submissions/${recordId}/timeline`);
   },
-  mySubmissions(player, challengeId) {
-    const q = challengeId ? `&challenge_id=${challengeId}` : "";
+  mySubmissions(player, challengeId, version) {
+    let q = "";
+    if (challengeId) q += `&challenge_id=${challengeId}`;
+    if (version) q += `&version=${version}`;
     return this._req(`/api/challenges/mine/submissions?player=${encodeURIComponent(player)}${q}`);
   },
 };

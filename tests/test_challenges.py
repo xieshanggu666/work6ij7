@@ -445,6 +445,52 @@ def test_leaderboard_isolated_by_version():
     assert ch_api.get_leaderboard(d["id"])["version"] == 2
     v1 = ch_api.get_leaderboard(d["id"], version=1)
     assert len(v1["entries"]) == 1 and v1["entries"][0]["record_id"] == s["record_id"]
+    assert v1["entries"][0]["version"] == 1
+    assert v1["current_version"] == 2 and v1["version_count"] == 2
+
+
+def test_old_version_submission_still_reviews_replays_and_unlocks():
+    a = _create(title="旧版前置")
+    b = _create(title="旧版后续", unlock_rule={"type": "challenge",
+                                              "challenge_id": a["id"]})
+    r = _run(a["id"])  # 成绩锚定 v1
+    s = _submit(a["id"], r["run_id"], "old-review")
+    ch_api.publish_version(a["id"], ch_api.VersionIn(**_def(budget_dv=0.003)))
+
+    # 新版本发布后，旧成绩仍可审核；通过后只进 v1 榜并开放旧档案回放
+    approved = _approve(s["record_id"])
+    assert approved["version"] == 1
+    assert approved["effects"]["leaderboard"] == {
+        "on_board": True, "best_record_id": s["record_id"], "version": 1}
+    assert ch_api.get_leaderboard(a["id"])["entries"] == []
+    v1_board = ch_api.get_leaderboard(a["id"], version=1)["entries"]
+    assert [e["record_id"] for e in v1_board] == [s["record_id"]]
+    detail = ch_api.get_submission(s["record_id"])
+    assert detail["replayable"] is True and detail["version"] == 1
+    assert detail["run_uid"] == r["run_id"] and detail["trajectory"]
+    # 旧版本成绩仍是对挑战本身的通关证据，继续影响依赖它的解锁
+    challenges = ch_api.list_challenges()["challenges"]
+    a_card = next(c for c in challenges if c["id"] == a["id"])
+    assert a_card["best"]["record_id"] == s["record_id"]
+    assert a_card["best"]["version"] == 1
+    assert a_card["best_current"] is None
+    assert _unlocked(challenges, b["id"]) is True
+
+    # 撤销旧成绩：从 v1 榜和回放中移除，并级联回收解锁；当前 v2 榜不受影响
+    revoked = _revoke(s["record_id"])
+    assert revoked["effects"]["leaderboard"] == {
+        "on_board": False, "best_record_id": None, "version": 1}
+    assert ch_api.get_leaderboard(a["id"], version=1)["entries"] == []
+    assert ch_api.get_submission(s["record_id"])["replayable"] is False
+    assert _unlocked(ch_api.list_challenges()["challenges"], b["id"]) is False
+
+    # 恢复旧成绩：重新进入 v1 榜、开放回放，并恢复解锁
+    restored = _restore(s["record_id"])
+    assert restored["effects"]["leaderboard"]["on_board"] is True
+    assert restored["effects"]["leaderboard"]["best_record_id"] == s["record_id"]
+    assert ch_api.get_leaderboard(a["id"], version=1)["entries"][0]["record_id"] == s["record_id"]
+    assert ch_api.get_submission(s["record_id"])["replayable"] is True
+    assert _unlocked(ch_api.list_challenges()["challenges"], b["id"]) is True
 
 
 # ---------- 解锁联动 ----------
@@ -639,6 +685,32 @@ def test_revoke_falls_back_to_next_best_leaderboard_entry():
     _restore(top_id)
     board3 = ch_api.get_leaderboard(d["id"])["entries"]
     assert len(board3) == 2 and board3[0]["record_id"] == top_id
+
+
+def test_revoke_restore_non_top_entry_is_still_on_its_leaderboard():
+    """在榜不等于榜首：每名玩家在该版本的最佳成绩撤销后才离榜，恢复后回原榜。"""
+    d = _create()
+    top, _ = _submitted(d["id"], player="榜首", sub_id="board-top")
+    lower, _ = _submitted(
+        d["id"], player="榜尾", sub_id="board-lower",
+        actions=[{"type": "burn", "angle": 90.0, "dv": 0.0035}])
+    top_out = _approve(top["record_id"])
+    lower_out = _approve(lower["record_id"])
+    assert top_out["effects"]["leaderboard"]["best_record_id"] == top["record_id"]
+    assert lower_out["effects"]["leaderboard"]["on_board"] is True
+    assert lower_out["effects"]["leaderboard"]["best_record_id"] == top["record_id"]
+
+    revoked = _revoke(lower["record_id"])
+    assert revoked["effects"]["leaderboard"]["on_board"] is False
+    assert revoked["effects"]["leaderboard"]["best_record_id"] == top["record_id"]
+    assert [e["record_id"] for e in ch_api.get_leaderboard(d["id"])["entries"]] == [
+        top["record_id"]]
+
+    restored = _restore(lower["record_id"])
+    assert restored["effects"]["leaderboard"]["on_board"] is True
+    assert restored["effects"]["leaderboard"]["best_record_id"] == top["record_id"]
+    assert [e["record_id"] for e in ch_api.get_leaderboard(d["id"])["entries"]] == [
+        top["record_id"], lower["record_id"]]
 
 
 # ---------- 玩家申诉与复核裁决 ----------

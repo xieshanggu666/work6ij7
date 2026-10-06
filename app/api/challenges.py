@@ -211,11 +211,12 @@ def appeals(status: str = "pending", limit: int = 50):
 
 @router.get("/mine/submissions")
 def my_submissions(player: str, challenge_id: Optional[int] = None,
-                   limit: int = 50):
+                   version: Optional[int] = None, limit: int = 50):
     """玩家按署名查询本人提交：审核状态/申诉入口/被撤销与回滚情况。"""
     with SessionLocal() as db:
         return {"submissions": ch_svc.player_submissions(
-            db, player, challenge_id=challenge_id, limit=limit)}
+            db, player, challenge_id=challenge_id, version=version,
+            limit=limit)}
 
 
 @router.post("/appeals/{appeal_id}/decision")
